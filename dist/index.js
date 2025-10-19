@@ -1,36 +1,47 @@
 import { WebSocketServer, WebSocket } from "ws";
 import { PrismaClient } from "../app/generated/prisma/client.js";
 const prisma = new PrismaClient();
-const PORT = 3010;
+const PORT = Number(process.env.PORT ?? 3010);
 const activeClients = new Map();
 const roomUserMap = new Map();
-const wss = new WebSocketServer({ port: PORT });
+const roomShapes = new Map(); // roomId → shapes[]
+let wss;
+try {
+    wss = new WebSocketServer({ port: PORT });
+}
+catch (err) {
+    console.error(`Failed to start WebSocket server on port ${PORT}:`, err?.message ?? err);
+    process.exit(1);
+}
+// extra safety: handle runtime errors emitted by the server
+wss.on("error", (err) => {
+    console.error("WebSocket server error:", err);
+    if (err?.code === "EADDRINUSE") {
+        console.error(`Port ${PORT} is already in use. If you intended to run another instance, stop it or set PORT to a different value.`);
+        process.exit(1);
+    }
+});
 wss.on("connection", (ws) => {
     console.log("🔌 Client connected");
     ws.on("message", async (data) => {
         try {
             const raw = data.toString();
-            console.log("📥 Raw message received:", raw);
             let parsed;
             try {
                 parsed = JSON.parse(raw);
             }
             catch (err) {
-                console.error("❌ Failed to parse JSON:", err);
                 ws.send(JSON.stringify({ type: "error", message: "Invalid JSON format" }));
                 return;
             }
-            console.log("🧾 Parsed message:", parsed);
-            // Handle registration
+            // 🧾 Register client
             if (parsed.type === "register") {
-                if (!parsed.roomId || !parsed.userId) {
-                    console.error("❌ Missing roomId or userId in register payload:", parsed);
+                const { roomId, userId } = parsed;
+                if (!roomId || !userId) {
                     ws.send(JSON.stringify({ type: "error", message: "Missing roomId or userId" }));
                     return;
                 }
-                const roomId = parsed.roomId;
-                const numericUserId = Number(parsed.userId);
-                console.log("🔍 Registering for room:", roomId, " and type of room: ", typeof (roomId), " user:", numericUserId);
+                const numericUserId = Number(userId);
                 let room;
                 try {
                     room = await prisma.roomId.findUnique({
@@ -38,63 +49,32 @@ wss.on("connection", (ws) => {
                         include: { users: true },
                     });
                 }
-                catch (err) {
-                    console.error("❌ Prisma error while fetching room:", err);
+                catch {
                     ws.send(JSON.stringify({ type: "error", message: "Database error during room lookup" }));
                     return;
                 }
-                console.log("Room fetched fromDB: ", room);
-                if (!room) {
-                    console.error("❌ Room not found:", roomId);
-                    ws.send(JSON.stringify({ type: "error", message: "Room not found" }));
-                    return;
-                }
-                const isAuthorized = room.users.some((u) => u.id === numericUserId);
-                if (!isAuthorized) {
-                    console.error("❌ Unauthorized user:", numericUserId, "for room:", roomId);
+                if (!room || !room.users.some((u) => u.id === numericUserId)) {
                     ws.send(JSON.stringify({ type: "error", message: "Unauthorized user or room" }));
                     return;
                 }
                 activeClients.set(ws, { userId: numericUserId, roomId });
-                if (!roomUserMap.has(roomId)) {
+                if (!roomUserMap.has(roomId))
                     roomUserMap.set(roomId, new Set());
-                }
                 roomUserMap.get(roomId).add(numericUserId);
-                try {
-                    ws.send(JSON.stringify({ type: "register-success", roomId, userId: numericUserId }));
-                }
-                catch (err) {
-                    console.error("❌ Failed to send register-success:", err);
-                }
+                ws.send(JSON.stringify({ type: "register-success", roomId, userId: numericUserId }));
                 return;
             }
-            // Handle message
+            // 💬 Handle chat message
             if (parsed.type === "message") {
                 const clientMeta = activeClients.get(ws);
                 if (!clientMeta) {
-                    console.error("❌ Message received from unregistered client");
                     ws.send(JSON.stringify({ type: "error", message: "Client not registered" }));
                     return;
                 }
                 const { roomId, user_id, text } = parsed;
                 const numericUserId = Number(user_id);
                 if (roomId !== clientMeta.roomId || numericUserId !== clientMeta.userId) {
-                    console.error("❌ Invalid room/user context:", parsed);
                     ws.send(JSON.stringify({ type: "error", message: "Invalid room or user context" }));
-                    return;
-                }
-                let room;
-                try {
-                    room = await prisma.roomId.findUnique({ where: { id: roomId } });
-                }
-                catch (err) {
-                    console.error("❌ Prisma error while validating room:", err);
-                    ws.send(JSON.stringify({ type: "error", message: "Database error during room validation" }));
-                    return;
-                }
-                if (!room) {
-                    console.error("❌ Room not found during message send:", roomId);
-                    ws.send(JSON.stringify({ type: "error", message: "Room not found" }));
                     return;
                 }
                 let chat;
@@ -104,47 +84,64 @@ wss.on("connection", (ws) => {
                             message: text,
                             createdAt: new Date(),
                             userId: numericUserId,
-                            roomId: roomId,
+                            roomId,
                         },
                     });
                 }
-                catch (err) {
-                    console.error("❌ Failed to create chat:", err);
+                catch {
                     ws.send(JSON.stringify({ type: "error", message: "Failed to save message" }));
                     return;
                 }
-                try {
-                    ws.send(JSON.stringify({ type: "message-sent", chat }));
+                ws.send(JSON.stringify({ type: "message-sent", chat }));
+                broadcastToRoom(roomId, { type: "new-message", chat }, ws);
+                return;
+            }
+            // 🎨 Drawing Events
+            if (["init", "draw", "stream", "move", "delete", "clear"].includes(parsed.type)) {
+                const clientMeta = activeClients.get(ws);
+                if (!clientMeta) {
+                    ws.send(JSON.stringify({ type: "error", message: "Client not registered" }));
+                    return;
                 }
-                catch (err) {
-                    console.error("❌ Failed to send message-sent to sender:", err);
+                const { roomId } = clientMeta;
+                const shapes = roomShapes.get(roomId) || [];
+                if (parsed.type === "init") {
+                    ws.send(JSON.stringify({ type: "init", shapes }));
+                    return;
                 }
-                const recipients = roomUserMap.get(roomId);
-                if (recipients) {
-                    for (const [client, meta] of activeClients.entries()) {
-                        if (client !== ws &&
-                            meta.roomId === roomId &&
-                            recipients.has(meta.userId) &&
-                            client.readyState === ws.OPEN) {
-                            try {
-                                client.send(JSON.stringify({ type: "new-message", chat }));
-                            }
-                            catch (err) {
-                                console.error("❌ Failed to broadcast to client:", err);
-                            }
-                        }
-                    }
+                if (parsed.type === "clear") {
+                    roomShapes.set(roomId, []);
+                    broadcastToRoom(roomId, { type: "sync", shapes: [] });
+                    return;
+                }
+                if (parsed.type === "draw" && parsed.element) {
+                    shapes.push(parsed.element);
+                    roomShapes.set(roomId, shapes);
+                    broadcastToRoom(roomId, { type: "sync", shapes });
+                    return;
+                }
+                if (parsed.type === "stream" && parsed.element && typeof parsed.index === "number") {
+                    shapes[parsed.index] = parsed.element;
+                    roomShapes.set(roomId, shapes);
+                    broadcastStreamToRoom(roomId, parsed.element, parsed.index, ws);
+                    return;
+                }
+                if (parsed.type === "move" && parsed.element && typeof parsed.index === "number") {
+                    shapes[parsed.index] = parsed.element;
+                    roomShapes.set(roomId, shapes);
+                    broadcastToRoom(roomId, { type: "sync", shapes });
+                    return;
+                }
+                if (parsed.type === "delete" && typeof parsed.index === "number") {
+                    shapes.splice(parsed.index, 1);
+                    roomShapes.set(roomId, shapes);
+                    broadcastToRoom(roomId, { type: "sync", shapes });
+                    return;
                 }
             }
         }
         catch (err) {
-            console.error("❌ Unexpected server error:", err);
-            try {
-                ws.send(JSON.stringify({ type: "error", message: "Unexpected server error" }));
-            }
-            catch (sendErr) {
-                console.error("❌ Failed to send error message to client:", sendErr);
-            }
+            ws.send(JSON.stringify({ type: "error", message: "Unexpected server error" }));
         }
     });
     ws.on("close", () => {
@@ -154,14 +151,37 @@ wss.on("connection", (ws) => {
             const roomSet = roomUserMap.get(roomId);
             if (roomSet) {
                 roomSet.delete(userId);
-                if (roomSet.size === 0) {
+                if (roomSet.size === 0)
                     roomUserMap.delete(roomId);
-                }
             }
         }
         activeClients.delete(ws);
         console.log("❎ Client disconnected");
     });
 });
+function broadcastToRoom(roomId, payload, exclude) {
+    const recipients = roomUserMap.get(roomId);
+    const message = JSON.stringify(payload);
+    for (const [client, meta] of activeClients.entries()) {
+        if (client !== exclude &&
+            meta.roomId === roomId &&
+            recipients?.has(meta.userId) &&
+            client.readyState === WebSocket.OPEN) {
+            client.send(message);
+        }
+    }
+}
+function broadcastStreamToRoom(roomId, element, index, sender) {
+    const recipients = roomUserMap.get(roomId);
+    const message = JSON.stringify({ type: "stream", element, index });
+    for (const [client, meta] of activeClients.entries()) {
+        if (client !== sender &&
+            meta.roomId === roomId &&
+            recipients?.has(meta.userId) &&
+            client.readyState === WebSocket.OPEN) {
+            client.send(message);
+        }
+    }
+}
 console.log(`🚀 WebSocket server running on ws://localhost:${PORT}`);
 //# sourceMappingURL=index.js.map
