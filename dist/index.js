@@ -62,6 +62,9 @@ wss.on("connection", (ws) => {
                     roomUserMap.set(roomId, new Set());
                 roomUserMap.get(roomId).add(numericUserId);
                 ws.send(JSON.stringify({ type: "register-success", roomId, userId: numericUserId }));
+                // broadcast updated user list to room
+                const list = Array.from(roomUserMap.get(roomId) || []);
+                broadcastToRoom(roomId, { type: 'user-list', users: list });
                 return;
             }
             // 💬 Handle chat message
@@ -139,6 +142,39 @@ wss.on("connection", (ws) => {
                     return;
                 }
             }
+            // --- WebRTC signaling messages ---
+            if (parsed.type === 'webrtc-offer' || parsed.type === 'webrtc-answer' || parsed.type === 'webrtc-ice') {
+                // payload should contain: targetUserId and data
+                const clientMeta = activeClients.get(ws);
+                if (!clientMeta) {
+                    ws.send(JSON.stringify({ type: 'error', message: 'Client not registered' }));
+                    return;
+                }
+                const { targetUserId, data } = parsed;
+                if (!targetUserId) {
+                    ws.send(JSON.stringify({ type: 'error', message: 'Missing targetUserId' }));
+                    return;
+                }
+                const forwarded = sendToUserInRoom(clientMeta.roomId, Number(targetUserId), {
+                    type: parsed.type,
+                    fromUserId: clientMeta.userId,
+                    data,
+                });
+                if (!forwarded) {
+                    ws.send(JSON.stringify({ type: 'error', message: 'Target user not connected' }));
+                }
+                return;
+            }
+            if (parsed.type === 'request-user-list') {
+                const clientMeta = activeClients.get(ws);
+                if (!clientMeta) {
+                    ws.send(JSON.stringify({ type: 'error', message: 'Client not registered' }));
+                    return;
+                }
+                const list = Array.from(roomUserMap.get(clientMeta.roomId) || []);
+                ws.send(JSON.stringify({ type: 'user-list', users: list }));
+                return;
+            }
         }
         catch (err) {
             ws.send(JSON.stringify({ type: "error", message: "Unexpected server error" }));
@@ -170,6 +206,16 @@ function broadcastToRoom(roomId, payload, exclude) {
             client.send(message);
         }
     }
+}
+function sendToUserInRoom(roomId, targetUserId, payload) {
+    const message = JSON.stringify(payload);
+    for (const [client, meta] of activeClients.entries()) {
+        if (meta.roomId === roomId && meta.userId === targetUserId && client.readyState === WebSocket.OPEN) {
+            client.send(message);
+            return true;
+        }
+    }
+    return false;
 }
 function broadcastStreamToRoom(roomId, element, index, sender) {
     const recipients = roomUserMap.get(roomId);
