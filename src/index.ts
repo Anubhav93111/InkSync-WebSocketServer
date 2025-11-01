@@ -256,4 +256,4 @@ function broadcastStreamToRoom(roomId: string, element: any, index: number, send
   }
 }
 
-console.log(`🚀 WebSocket server running on port ${PORT}`);
+console.log(`🚀 WebSocket server running on port `);
