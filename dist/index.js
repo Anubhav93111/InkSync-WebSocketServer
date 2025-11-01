@@ -1,19 +1,18 @@
-"use strict";
-Object.defineProperty(exports, "__esModule", { value: true });
-const ws_1 = require("ws");
-const client_js_1 = require("../app/generated/prisma/client.js");
-const prisma = new client_js_1.PrismaClient();
-const PORT = Number(process.env.PORT ?? 3010);
+import { WebSocketServer, WebSocket } from "ws";
+import { PrismaClient } from "../app/generated/prisma/client.js";
+const prisma = new PrismaClient();
+const PORT = Number(process.env.PORT ?? 10000);
 const activeClients = new Map();
 const roomUserMap = new Map();
-const roomShapes = new Map(); // roomId → shapes[]
+const roomShapes = new Map();
 let wss;
 try {
-    wss = new ws_1.WebSocketServer({ port: PORT });
+    wss = new WebSocketServer({ port: PORT });
+    console.log(`🚀 WebSocket server running on port ${PORT}`);
 }
 catch (err) {
     const error = err;
-    console.error(`Failed to start WebSocket server on port ${PORT}:`, error.message);
+    console.error(`❌ Failed to start WebSocket server on port ${PORT}:`, error.message);
     process.exit(1);
 }
 wss.on("error", (err) => {
@@ -47,7 +46,7 @@ wss.on("connection", (ws) => {
                 try {
                     room = await prisma.roomId.findUnique({
                         where: { id: roomId },
-                        include: { users: true },
+                        include: { users: true }
                     });
                 }
                 catch {
@@ -86,8 +85,8 @@ wss.on("connection", (ws) => {
                             message: text,
                             createdAt: new Date(),
                             userId: numericUserId,
-                            roomId,
-                        },
+                            roomId
+                        }
                     });
                 }
                 catch {
@@ -106,38 +105,40 @@ wss.on("connection", (ws) => {
                 }
                 const { roomId } = clientMeta;
                 const shapes = roomShapes.get(roomId) || [];
-                if (parsed.type === "init") {
-                    ws.send(JSON.stringify({ type: "init", shapes }));
-                    return;
-                }
-                if (parsed.type === "clear") {
-                    roomShapes.set(roomId, []);
-                    broadcastToRoom(roomId, { type: "sync", shapes: [] });
-                    return;
-                }
-                if (parsed.type === "draw" && parsed.element) {
-                    shapes.push(parsed.element);
-                    roomShapes.set(roomId, shapes);
-                    broadcastToRoom(roomId, { type: "sync", shapes });
-                    return;
-                }
-                if (parsed.type === "stream" && parsed.element && typeof parsed.index === "number") {
-                    shapes[parsed.index] = parsed.element;
-                    roomShapes.set(roomId, shapes);
-                    broadcastStreamToRoom(roomId, parsed.element, parsed.index, ws);
-                    return;
-                }
-                if (parsed.type === "move" && parsed.element && typeof parsed.index === "number") {
-                    shapes[parsed.index] = parsed.element;
-                    roomShapes.set(roomId, shapes);
-                    broadcastToRoom(roomId, { type: "sync", shapes });
-                    return;
-                }
-                if (parsed.type === "delete" && typeof parsed.index === "number") {
-                    shapes.splice(parsed.index, 1);
-                    roomShapes.set(roomId, shapes);
-                    broadcastToRoom(roomId, { type: "sync", shapes });
-                    return;
+                switch (parsed.type) {
+                    case "init":
+                        ws.send(JSON.stringify({ type: "init", shapes }));
+                        break;
+                    case "clear":
+                        roomShapes.set(roomId, []);
+                        broadcastToRoom(roomId, { type: "sync", shapes: [] });
+                        break;
+                    case "draw":
+                        shapes.push(parsed.element);
+                        roomShapes.set(roomId, shapes);
+                        broadcastToRoom(roomId, { type: "sync", shapes });
+                        break;
+                    case "stream":
+                        if (typeof parsed.index === "number") {
+                            shapes[parsed.index] = parsed.element;
+                            roomShapes.set(roomId, shapes);
+                            broadcastStreamToRoom(roomId, parsed.element, parsed.index, ws);
+                        }
+                        break;
+                    case "move":
+                        if (typeof parsed.index === "number") {
+                            shapes[parsed.index] = parsed.element;
+                            roomShapes.set(roomId, shapes);
+                            broadcastToRoom(roomId, { type: "sync", shapes });
+                        }
+                        break;
+                    case "delete":
+                        if (typeof parsed.index === "number") {
+                            shapes.splice(parsed.index, 1);
+                            roomShapes.set(roomId, shapes);
+                            broadcastToRoom(roomId, { type: "sync", shapes });
+                        }
+                        break;
                 }
             }
             if (["webrtc-offer", "webrtc-answer", "webrtc-ice"].includes(parsed.type)) {
@@ -154,12 +155,11 @@ wss.on("connection", (ws) => {
                 const forwarded = sendToUserInRoom(clientMeta.roomId, Number(targetUserId), {
                     type: parsed.type,
                     fromUserId: clientMeta.userId,
-                    data,
+                    data
                 });
                 if (!forwarded) {
                     ws.send(JSON.stringify({ type: "error", message: "Target user not connected" }));
                 }
-                return;
             }
             if (parsed.type === "request-user-list") {
                 const clientMeta = activeClients.get(ws);
@@ -169,10 +169,9 @@ wss.on("connection", (ws) => {
                 }
                 const list = Array.from(roomUserMap.get(clientMeta.roomId) || []);
                 ws.send(JSON.stringify({ type: "user-list", users: list }));
-                return;
             }
         }
-        catch (err) {
+        catch {
             ws.send(JSON.stringify({ type: "error", message: "Unexpected server error" }));
         }
     });
@@ -181,13 +180,11 @@ wss.on("connection", (ws) => {
         if (meta) {
             const { roomId, userId } = meta;
             const roomSet = roomUserMap.get(roomId);
-            if (roomSet) {
-                roomSet.delete(userId);
-                if (roomSet.size === 0)
-                    roomUserMap.delete(roomId);
-            }
+            roomSet?.delete(userId);
+            if (roomSet?.size === 0)
+                roomUserMap.delete(roomId);
+            activeClients.delete(ws);
         }
-        activeClients.delete(ws);
         console.log("❎ Client disconnected");
     });
 });
@@ -198,7 +195,7 @@ function broadcastToRoom(roomId, payload, exclude) {
         if (client !== exclude &&
             meta.roomId === roomId &&
             recipients?.has(meta.userId) &&
-            client.readyState === ws_1.WebSocket.OPEN) {
+            client.readyState === WebSocket.OPEN) {
             client.send(message);
         }
     }
@@ -206,7 +203,7 @@ function broadcastToRoom(roomId, payload, exclude) {
 function sendToUserInRoom(roomId, targetUserId, payload) {
     const message = JSON.stringify(payload);
     for (const [client, meta] of activeClients.entries()) {
-        if (meta.roomId === roomId && meta.userId === targetUserId && client.readyState === ws_1.WebSocket.OPEN) {
+        if (meta.roomId === roomId && meta.userId === targetUserId && client.readyState === WebSocket.OPEN) {
             client.send(message);
             return true;
         }
@@ -220,9 +217,8 @@ function broadcastStreamToRoom(roomId, element, index, sender) {
         if (client !== sender &&
             meta.roomId === roomId &&
             recipients?.has(meta.userId) &&
-            client.readyState === ws_1.WebSocket.OPEN) {
+            client.readyState === WebSocket.OPEN) {
             client.send(message);
         }
     }
 }
-console.log(`🚀 WebSocket server running on port `);
