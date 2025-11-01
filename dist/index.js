@@ -1,13 +1,15 @@
-import { WebSocketServer, WebSocket } from "ws";
-import { PrismaClient } from "../app/generated/prisma/client.js";
-const prisma = new PrismaClient();
+"use strict";
+Object.defineProperty(exports, "__esModule", { value: true });
+const ws_1 = require("ws");
+const client_js_1 = require("../app/generated/prisma/client.js");
+const prisma = new client_js_1.PrismaClient();
 const PORT = Number(process.env.PORT ?? 3010);
 const activeClients = new Map();
 const roomUserMap = new Map();
 const roomShapes = new Map(); // roomId → shapes[]
 let wss;
 try {
-    wss = new WebSocketServer({ port: PORT });
+    wss = new ws_1.WebSocketServer({ port: PORT });
 }
 catch (err) {
     const error = err;
@@ -196,7 +198,7 @@ function broadcastToRoom(roomId, payload, exclude) {
         if (client !== exclude &&
             meta.roomId === roomId &&
             recipients?.has(meta.userId) &&
-            client.readyState === WebSocket.OPEN) {
+            client.readyState === ws_1.WebSocket.OPEN) {
             client.send(message);
         }
     }
@@ -204,7 +206,7 @@ function broadcastToRoom(roomId, payload, exclude) {
 function sendToUserInRoom(roomId, targetUserId, payload) {
     const message = JSON.stringify(payload);
     for (const [client, meta] of activeClients.entries()) {
-        if (meta.roomId === roomId && meta.userId === targetUserId && client.readyState === WebSocket.OPEN) {
+        if (meta.roomId === roomId && meta.userId === targetUserId && client.readyState === ws_1.WebSocket.OPEN) {
             client.send(message);
             return true;
         }
@@ -218,7 +220,7 @@ function broadcastStreamToRoom(roomId, element, index, sender) {
         if (client !== sender &&
             meta.roomId === roomId &&
             recipients?.has(meta.userId) &&
-            client.readyState === WebSocket.OPEN) {
+            client.readyState === ws_1.WebSocket.OPEN) {
             client.send(message);
         }
     }
