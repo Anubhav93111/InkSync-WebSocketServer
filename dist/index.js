@@ -224,4 +224,3 @@ function broadcastStreamToRoom(roomId, element, index, sender) {
     }
 }
 console.log(`🚀 WebSocket server running on port `);
-//# sourceMappingURL=index.js.map
