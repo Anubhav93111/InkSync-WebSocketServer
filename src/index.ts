@@ -11,35 +11,34 @@ const roomShapes = new Map<string, any[]>(); // roomId → shapes[]
 let wss: WebSocketServer;
 try {
   wss = new WebSocketServer({ port: PORT });
-} catch (err: any) {
-  console.error(`Failed to start WebSocket server on port ${PORT}:`, err?.message ?? err);
+} catch (err: unknown) {
+  const error = err as Error;
+  console.error(`Failed to start WebSocket server on port ${PORT}:`, error.message);
   process.exit(1);
 }
 
-// extra safety: handle runtime errors emitted by the server
-wss.on("error", (err) => {
+wss.on("error", (err: Error) => {
   console.error("WebSocket server error:", err);
   if ((err as any)?.code === "EADDRINUSE") {
-    console.error(`Port ${PORT} is already in use. If you intended to run another instance, stop it or set PORT to a different value.`);
+    console.error(`Port ${PORT} is already in use.`);
     process.exit(1);
   }
 });
 
-wss.on("connection", (ws) => {
+wss.on("connection", (ws: WebSocket) => {
   console.log("🔌 Client connected");
 
   ws.on("message", async (data: Buffer) => {
     try {
       const raw = data.toString();
-      let parsed;
+      let parsed: any;
       try {
         parsed = JSON.parse(raw);
-      } catch (err) {
+      } catch {
         ws.send(JSON.stringify({ type: "error", message: "Invalid JSON format" }));
         return;
       }
 
-      // 🧾 Register client
       if (parsed.type === "register") {
         const { roomId, userId } = parsed;
         if (!roomId || !userId) {
@@ -69,13 +68,11 @@ wss.on("connection", (ws) => {
         roomUserMap.get(roomId)!.add(numericUserId);
 
         ws.send(JSON.stringify({ type: "register-success", roomId, userId: numericUserId }));
-        // broadcast updated user list to room
         const list = Array.from(roomUserMap.get(roomId) || []);
-        broadcastToRoom(roomId, { type: 'user-list', users: list });
+        broadcastToRoom(roomId, { type: "user-list", users: list });
         return;
       }
 
-      // 💬 Handle chat message
       if (parsed.type === "message") {
         const clientMeta = activeClients.get(ws);
         if (!clientMeta) {
@@ -110,7 +107,6 @@ wss.on("connection", (ws) => {
         return;
       }
 
-      // 🎨 Drawing Events
       if (["init", "draw", "stream", "move", "delete", "clear"].includes(parsed.type)) {
         const clientMeta = activeClients.get(ws);
         if (!clientMeta) {
@@ -161,18 +157,16 @@ wss.on("connection", (ws) => {
         }
       }
 
-      // --- WebRTC signaling messages ---
-      if (parsed.type === 'webrtc-offer' || parsed.type === 'webrtc-answer' || parsed.type === 'webrtc-ice') {
-        // payload should contain: targetUserId and data
+      if (["webrtc-offer", "webrtc-answer", "webrtc-ice"].includes(parsed.type)) {
         const clientMeta = activeClients.get(ws);
         if (!clientMeta) {
-          ws.send(JSON.stringify({ type: 'error', message: 'Client not registered' }));
+          ws.send(JSON.stringify({ type: "error", message: "Client not registered" }));
           return;
         }
 
         const { targetUserId, data } = parsed;
         if (!targetUserId) {
-          ws.send(JSON.stringify({ type: 'error', message: 'Missing targetUserId' }));
+          ws.send(JSON.stringify({ type: "error", message: "Missing targetUserId" }));
           return;
         }
 
@@ -183,20 +177,20 @@ wss.on("connection", (ws) => {
         });
 
         if (!forwarded) {
-          ws.send(JSON.stringify({ type: 'error', message: 'Target user not connected' }));
+          ws.send(JSON.stringify({ type: "error", message: "Target user not connected" }));
         }
 
         return;
       }
 
-      if (parsed.type === 'request-user-list') {
+      if (parsed.type === "request-user-list") {
         const clientMeta = activeClients.get(ws);
         if (!clientMeta) {
-          ws.send(JSON.stringify({ type: 'error', message: 'Client not registered' }));
+          ws.send(JSON.stringify({ type: "error", message: "Client not registered" }));
           return;
         }
         const list = Array.from(roomUserMap.get(clientMeta.roomId) || []);
-        ws.send(JSON.stringify({ type: 'user-list', users: list }));
+        ws.send(JSON.stringify({ type: "user-list", users: list }));
         return;
       }
     } catch (err) {
@@ -235,7 +229,7 @@ function broadcastToRoom(roomId: string, payload: any, exclude?: WebSocket) {
   }
 }
 
-function sendToUserInRoom(roomId: string, targetUserId: number, payload: any) {
+function sendToUserInRoom(roomId: string, targetUserId: number, payload: any): boolean {
   const message = JSON.stringify(payload);
   for (const [client, meta] of activeClients.entries()) {
     if (meta.roomId === roomId && meta.userId === targetUserId && client.readyState === WebSocket.OPEN) {
@@ -262,4 +256,4 @@ function broadcastStreamToRoom(roomId: string, element: any, index: number, send
   }
 }
 
-console.log(`🚀 WebSocket server running on ws://localhost:${PORT}`);
+console.log(`🚀 WebSocket server running on port ${PORT}`);

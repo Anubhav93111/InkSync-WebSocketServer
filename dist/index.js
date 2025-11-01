@@ -10,14 +10,14 @@ try {
     wss = new WebSocketServer({ port: PORT });
 }
 catch (err) {
-    console.error(`Failed to start WebSocket server on port ${PORT}:`, err?.message ?? err);
+    const error = err;
+    console.error(`Failed to start WebSocket server on port ${PORT}:`, error.message);
     process.exit(1);
 }
-// extra safety: handle runtime errors emitted by the server
 wss.on("error", (err) => {
     console.error("WebSocket server error:", err);
     if (err?.code === "EADDRINUSE") {
-        console.error(`Port ${PORT} is already in use. If you intended to run another instance, stop it or set PORT to a different value.`);
+        console.error(`Port ${PORT} is already in use.`);
         process.exit(1);
     }
 });
@@ -30,11 +30,10 @@ wss.on("connection", (ws) => {
             try {
                 parsed = JSON.parse(raw);
             }
-            catch (err) {
+            catch {
                 ws.send(JSON.stringify({ type: "error", message: "Invalid JSON format" }));
                 return;
             }
-            // 🧾 Register client
             if (parsed.type === "register") {
                 const { roomId, userId } = parsed;
                 if (!roomId || !userId) {
@@ -62,12 +61,10 @@ wss.on("connection", (ws) => {
                     roomUserMap.set(roomId, new Set());
                 roomUserMap.get(roomId).add(numericUserId);
                 ws.send(JSON.stringify({ type: "register-success", roomId, userId: numericUserId }));
-                // broadcast updated user list to room
                 const list = Array.from(roomUserMap.get(roomId) || []);
-                broadcastToRoom(roomId, { type: 'user-list', users: list });
+                broadcastToRoom(roomId, { type: "user-list", users: list });
                 return;
             }
-            // 💬 Handle chat message
             if (parsed.type === "message") {
                 const clientMeta = activeClients.get(ws);
                 if (!clientMeta) {
@@ -99,7 +96,6 @@ wss.on("connection", (ws) => {
                 broadcastToRoom(roomId, { type: "new-message", chat }, ws);
                 return;
             }
-            // 🎨 Drawing Events
             if (["init", "draw", "stream", "move", "delete", "clear"].includes(parsed.type)) {
                 const clientMeta = activeClients.get(ws);
                 if (!clientMeta) {
@@ -142,17 +138,15 @@ wss.on("connection", (ws) => {
                     return;
                 }
             }
-            // --- WebRTC signaling messages ---
-            if (parsed.type === 'webrtc-offer' || parsed.type === 'webrtc-answer' || parsed.type === 'webrtc-ice') {
-                // payload should contain: targetUserId and data
+            if (["webrtc-offer", "webrtc-answer", "webrtc-ice"].includes(parsed.type)) {
                 const clientMeta = activeClients.get(ws);
                 if (!clientMeta) {
-                    ws.send(JSON.stringify({ type: 'error', message: 'Client not registered' }));
+                    ws.send(JSON.stringify({ type: "error", message: "Client not registered" }));
                     return;
                 }
                 const { targetUserId, data } = parsed;
                 if (!targetUserId) {
-                    ws.send(JSON.stringify({ type: 'error', message: 'Missing targetUserId' }));
+                    ws.send(JSON.stringify({ type: "error", message: "Missing targetUserId" }));
                     return;
                 }
                 const forwarded = sendToUserInRoom(clientMeta.roomId, Number(targetUserId), {
@@ -161,18 +155,18 @@ wss.on("connection", (ws) => {
                     data,
                 });
                 if (!forwarded) {
-                    ws.send(JSON.stringify({ type: 'error', message: 'Target user not connected' }));
+                    ws.send(JSON.stringify({ type: "error", message: "Target user not connected" }));
                 }
                 return;
             }
-            if (parsed.type === 'request-user-list') {
+            if (parsed.type === "request-user-list") {
                 const clientMeta = activeClients.get(ws);
                 if (!clientMeta) {
-                    ws.send(JSON.stringify({ type: 'error', message: 'Client not registered' }));
+                    ws.send(JSON.stringify({ type: "error", message: "Client not registered" }));
                     return;
                 }
                 const list = Array.from(roomUserMap.get(clientMeta.roomId) || []);
-                ws.send(JSON.stringify({ type: 'user-list', users: list }));
+                ws.send(JSON.stringify({ type: "user-list", users: list }));
                 return;
             }
         }
@@ -229,5 +223,5 @@ function broadcastStreamToRoom(roomId, element, index, sender) {
         }
     }
 }
-console.log(`🚀 WebSocket server running on ws://localhost:${PORT}`);
+console.log(`🚀 WebSocket server running on port ${PORT}`);
 //# sourceMappingURL=index.js.map
