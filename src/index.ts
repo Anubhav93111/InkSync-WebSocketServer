@@ -2,18 +2,19 @@ import { WebSocketServer, WebSocket } from "ws";
 import { PrismaClient } from "../app/generated/prisma/client.js";
 
 const prisma = new PrismaClient();
-const PORT = Number(process.env.PORT ?? 3010);
+const PORT = Number(process.env.PORT ?? 10000);
 
 const activeClients = new Map<WebSocket, { userId: number; roomId: string }>();
 const roomUserMap = new Map<string, Set<number>>();
-const roomShapes = new Map<string, any[]>(); // roomId → shapes[]
+const roomShapes = new Map<string, any[]>();
 
 let wss: WebSocketServer;
 try {
   wss = new WebSocketServer({ port: PORT });
+  console.log(`🚀 WebSocket server running on port ${PORT}`);
 } catch (err: unknown) {
   const error = err as Error;
-  console.error(`Failed to start WebSocket server on port ${PORT}:`, error.message);
+  console.error(`❌ Failed to start WebSocket server on port ${PORT}:`, error.message);
   process.exit(1);
 }
 
@@ -51,7 +52,7 @@ wss.on("connection", (ws: WebSocket) => {
         try {
           room = await prisma.roomId.findUnique({
             where: { id: roomId },
-            include: { users: true },
+            include: { users: true }
           });
         } catch {
           ws.send(JSON.stringify({ type: "error", message: "Database error during room lookup" }));
@@ -94,8 +95,8 @@ wss.on("connection", (ws: WebSocket) => {
               message: text,
               createdAt: new Date(),
               userId: numericUserId,
-              roomId,
-            },
+              roomId
+            }
           });
         } catch {
           ws.send(JSON.stringify({ type: "error", message: "Failed to save message" }));
@@ -117,43 +118,45 @@ wss.on("connection", (ws: WebSocket) => {
         const { roomId } = clientMeta;
         const shapes = roomShapes.get(roomId) || [];
 
-        if (parsed.type === "init") {
-          ws.send(JSON.stringify({ type: "init", shapes }));
-          return;
-        }
+        switch (parsed.type) {
+          case "init":
+            ws.send(JSON.stringify({ type: "init", shapes }));
+            break;
 
-        if (parsed.type === "clear") {
-          roomShapes.set(roomId, []);
-          broadcastToRoom(roomId, { type: "sync", shapes: [] });
-          return;
-        }
+          case "clear":
+            roomShapes.set(roomId, []);
+            broadcastToRoom(roomId, { type: "sync", shapes: [] });
+            break;
 
-        if (parsed.type === "draw" && parsed.element) {
-          shapes.push(parsed.element);
-          roomShapes.set(roomId, shapes);
-          broadcastToRoom(roomId, { type: "sync", shapes });
-          return;
-        }
+          case "draw":
+            shapes.push(parsed.element);
+            roomShapes.set(roomId, shapes);
+            broadcastToRoom(roomId, { type: "sync", shapes });
+            break;
 
-        if (parsed.type === "stream" && parsed.element && typeof parsed.index === "number") {
-          shapes[parsed.index] = parsed.element;
-          roomShapes.set(roomId, shapes);
-          broadcastStreamToRoom(roomId, parsed.element, parsed.index, ws);
-          return;
-        }
+          case "stream":
+            if (typeof parsed.index === "number") {
+              shapes[parsed.index] = parsed.element;
+              roomShapes.set(roomId, shapes);
+              broadcastStreamToRoom(roomId, parsed.element, parsed.index, ws);
+            }
+            break;
 
-        if (parsed.type === "move" && parsed.element && typeof parsed.index === "number") {
-          shapes[parsed.index] = parsed.element;
-          roomShapes.set(roomId, shapes);
-          broadcastToRoom(roomId, { type: "sync", shapes });
-          return;
-        }
+          case "move":
+            if (typeof parsed.index === "number") {
+              shapes[parsed.index] = parsed.element;
+              roomShapes.set(roomId, shapes);
+              broadcastToRoom(roomId, { type: "sync", shapes });
+            }
+            break;
 
-        if (parsed.type === "delete" && typeof parsed.index === "number") {
-          shapes.splice(parsed.index, 1);
-          roomShapes.set(roomId, shapes);
-          broadcastToRoom(roomId, { type: "sync", shapes });
-          return;
+          case "delete":
+            if (typeof parsed.index === "number") {
+              shapes.splice(parsed.index, 1);
+              roomShapes.set(roomId, shapes);
+              broadcastToRoom(roomId, { type: "sync", shapes });
+            }
+            break;
         }
       }
 
@@ -173,14 +176,12 @@ wss.on("connection", (ws: WebSocket) => {
         const forwarded = sendToUserInRoom(clientMeta.roomId, Number(targetUserId), {
           type: parsed.type,
           fromUserId: clientMeta.userId,
-          data,
+          data
         });
 
         if (!forwarded) {
           ws.send(JSON.stringify({ type: "error", message: "Target user not connected" }));
         }
-
-        return;
       }
 
       if (parsed.type === "request-user-list") {
@@ -191,9 +192,8 @@ wss.on("connection", (ws: WebSocket) => {
         }
         const list = Array.from(roomUserMap.get(clientMeta.roomId) || []);
         ws.send(JSON.stringify({ type: "user-list", users: list }));
-        return;
       }
-    } catch (err) {
+    } catch {
       ws.send(JSON.stringify({ type: "error", message: "Unexpected server error" }));
     }
   });
@@ -203,12 +203,10 @@ wss.on("connection", (ws: WebSocket) => {
     if (meta) {
       const { roomId, userId } = meta;
       const roomSet = roomUserMap.get(roomId);
-      if (roomSet) {
-        roomSet.delete(userId);
-        if (roomSet.size === 0) roomUserMap.delete(roomId);
-      }
+      roomSet?.delete(userId);
+      if (roomSet?.size === 0) roomUserMap.delete(roomId);
+      activeClients.delete(ws);
     }
-    activeClients.delete(ws);
     console.log("❎ Client disconnected");
   });
 });
@@ -216,7 +214,6 @@ wss.on("connection", (ws: WebSocket) => {
 function broadcastToRoom(roomId: string, payload: any, exclude?: WebSocket) {
   const recipients = roomUserMap.get(roomId);
   const message = JSON.stringify(payload);
-
   for (const [client, meta] of activeClients.entries()) {
     if (
       client !== exclude &&
@@ -243,7 +240,6 @@ function sendToUserInRoom(roomId: string, targetUserId: number, payload: any): b
 function broadcastStreamToRoom(roomId: string, element: any, index: number, sender: WebSocket) {
   const recipients = roomUserMap.get(roomId);
   const message = JSON.stringify({ type: "stream", element, index });
-
   for (const [client, meta] of activeClients.entries()) {
     if (
       client !== sender &&
@@ -255,5 +251,3 @@ function broadcastStreamToRoom(roomId: string, element: any, index: number, send
     }
   }
 }
-
-console.log(`🚀 WebSocket server running on port `);
