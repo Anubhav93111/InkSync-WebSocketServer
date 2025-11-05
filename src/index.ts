@@ -2,45 +2,34 @@ import { WebSocketServer, WebSocket } from "ws";
 import { PrismaClient } from "../app/generated/prisma/client.js";
 
 const prisma = new PrismaClient();
-const PORT = Number(process.env.PORT ?? 10000);
+const PORT = Number(process.env.PORT ?? 3010);
 
 const activeClients = new Map<WebSocket, { userId: number; roomId: string }>();
 const roomUserMap = new Map<string, Set<number>>();
 const roomShapes = new Map<string, any[]>();
 
-let wss: WebSocketServer;
-try {
-  wss = new WebSocketServer({ port: PORT });
-  console.log(`🚀 WebSocket server running on port ${PORT}`);
-} catch (err: unknown) {
-  const error = err as Error;
-  console.error(`❌ Failed to start WebSocket server on port ${PORT}:`, error.message);
-  process.exit(1);
-}
-
-wss.on("error", (err: Error) => {
-  console.error("WebSocket server error:", err);
-  if ((err as any)?.code === "EADDRINUSE") {
-    console.error(`Port ${PORT} is already in use.`);
-    process.exit(1);
-  }
-});
+const wss = new WebSocketServer({ port: PORT });
+console.log(`🚀 WebSocket server running on port ${PORT}`);
 
 wss.on("connection", (ws: WebSocket) => {
   console.log("🔌 Client connected");
-
   ws.on("message", async (data: Buffer) => {
+    let parsed: any;
     try {
-      const raw = data.toString();
-      let parsed: any;
+      parsed = JSON.parse(data.toString());
+    } catch (err) {
+      console.warn('Failed to parse incoming message', err);
       try {
-        parsed = JSON.parse(raw);
-      } catch {
         ws.send(JSON.stringify({ type: "error", message: "Invalid JSON format" }));
-        return;
-      }
+      } catch {}
+      return;
+    }
 
-      if (parsed.type === "register") {
+    const clientMeta = activeClients.get(ws);
+
+    try {
+      switch (parsed.type) {
+      case "register": {
         const { roomId, userId } = parsed;
         if (!roomId || !userId) {
           ws.send(JSON.stringify({ type: "error", message: "Missing roomId or userId" }));
@@ -48,16 +37,10 @@ wss.on("connection", (ws: WebSocket) => {
         }
 
         const numericUserId = Number(userId);
-        let room;
-        try {
-          room = await prisma.roomId.findUnique({
-            where: { id: roomId },
-            include: { users: true }
-          });
-        } catch {
-          ws.send(JSON.stringify({ type: "error", message: "Database error during room lookup" }));
-          return;
-        }
+        const room = await prisma.roomId.findUnique({
+          where: { id: roomId },
+          include: { users: true },
+        });
 
         if (!room || !room.users.some((u) => u.id === numericUserId)) {
           ws.send(JSON.stringify({ type: "error", message: "Unauthorized user or room" }));
@@ -68,14 +51,25 @@ wss.on("connection", (ws: WebSocket) => {
         if (!roomUserMap.has(roomId)) roomUserMap.set(roomId, new Set());
         roomUserMap.get(roomId)!.add(numericUserId);
 
+        console.log("✅ Registered user:", numericUserId, "in room:", roomId);
+        console.log("🧑‍🤝‍🧑 Current room users:", Array.from(roomUserMap.get(roomId)!));
+
         ws.send(JSON.stringify({ type: "register-success", roomId, userId: numericUserId }));
-        const list = Array.from(roomUserMap.get(roomId) || []);
-        broadcastToRoom(roomId, { type: "user-list", users: list });
-        return;
+        broadcastToRoom(roomId, { type: "user-list", users: Array.from(roomUserMap.get(roomId)!) });
+        break;
       }
 
-      if (parsed.type === "message") {
-        const clientMeta = activeClients.get(ws);
+      case "request-user-list": {
+        if (!clientMeta) {
+          ws.send(JSON.stringify({ type: "error", message: "Client not registered" }));
+          return;
+        }
+        const list = Array.from(roomUserMap.get(clientMeta.roomId) || []);
+        ws.send(JSON.stringify({ type: "user-list", users: list }));
+        break;
+      }
+
+      case "message": {
         if (!clientMeta) {
           ws.send(JSON.stringify({ type: "error", message: "Client not registered" }));
           return;
@@ -83,33 +77,32 @@ wss.on("connection", (ws: WebSocket) => {
 
         const { roomId, user_id, text } = parsed;
         const numericUserId = Number(user_id);
+
         if (roomId !== clientMeta.roomId || numericUserId !== clientMeta.userId) {
           ws.send(JSON.stringify({ type: "error", message: "Invalid room or user context" }));
           return;
         }
 
-        let chat;
-        try {
-          chat = await prisma.chat.create({
-            data: {
-              message: text,
-              createdAt: new Date(),
-              userId: numericUserId,
-              roomId
-            }
-          });
-        } catch {
-          ws.send(JSON.stringify({ type: "error", message: "Failed to save message" }));
-          return;
-        }
+        const chat = await prisma.chat.create({
+          data: {
+            message: text,
+            createdAt: new Date(),
+            userId: numericUserId,
+            roomId,
+          },
+        });
 
         ws.send(JSON.stringify({ type: "message-sent", chat }));
         broadcastToRoom(roomId, { type: "new-message", chat }, ws);
-        return;
+        break;
       }
 
-      if (["init", "draw", "stream", "move", "delete", "clear"].includes(parsed.type)) {
-        const clientMeta = activeClients.get(ws);
+      case "init":
+      case "draw":
+      case "stream":
+      case "move":
+      case "delete":
+      case "clear": {
         if (!clientMeta) {
           ws.send(JSON.stringify({ type: "error", message: "Client not registered" }));
           return;
@@ -158,10 +151,12 @@ wss.on("connection", (ws: WebSocket) => {
             }
             break;
         }
+        break;
       }
 
-      if (["webrtc-offer", "webrtc-answer", "webrtc-ice"].includes(parsed.type)) {
-        const clientMeta = activeClients.get(ws);
+      case "webrtc-offer":
+      case "webrtc-answer":
+      case "webrtc-ice": {
         if (!clientMeta) {
           ws.send(JSON.stringify({ type: "error", message: "Client not registered" }));
           return;
@@ -173,28 +168,31 @@ wss.on("connection", (ws: WebSocket) => {
           return;
         }
 
+        console.log("🔁 Forwarding signaling:", parsed.type, "from", clientMeta.userId, "to", targetUserId);
+
         const forwarded = sendToUserInRoom(clientMeta.roomId, Number(targetUserId), {
           type: parsed.type,
           fromUserId: clientMeta.userId,
-          data
+          data,
         });
 
         if (!forwarded) {
+          console.warn("⚠️ Target user not connected:", targetUserId);
           ws.send(JSON.stringify({ type: "error", message: "Target user not connected" }));
         }
+        break;
       }
 
-      if (parsed.type === "request-user-list") {
-        const clientMeta = activeClients.get(ws);
-        if (!clientMeta) {
-          ws.send(JSON.stringify({ type: "error", message: "Client not registered" }));
-          return;
-        }
-        const list = Array.from(roomUserMap.get(clientMeta.roomId) || []);
-        ws.send(JSON.stringify({ type: "user-list", users: list }));
+      default:
+        try {
+          ws.send(JSON.stringify({ type: "error", message: "Unknown message type" }));
+        } catch {}
       }
-    } catch {
-      ws.send(JSON.stringify({ type: "error", message: "Unexpected server error" }));
+    } catch (err) {
+      console.error('Error handling ws message', err);
+      try {
+        ws.send(JSON.stringify({ type: 'error', message: 'Server error' }));
+      } catch {}
     }
   });
 
@@ -211,6 +209,33 @@ wss.on("connection", (ws: WebSocket) => {
   });
 });
 
+// Graceful shutdown and Prisma cleanup for production
+async function shutdown(signal?: string) {
+  console.log('Shutting down server', signal || '');
+  try {
+    wss.close();
+  } catch (e) {
+    console.warn('Error closing WebSocket server', e);
+  }
+  try {
+    await prisma.$disconnect();
+  } catch (e) {
+    console.warn('Error disconnecting Prisma client', e);
+  }
+  process.exit(0);
+}
+
+process.on('SIGINT', () => shutdown('SIGINT'));
+process.on('SIGTERM', () => shutdown('SIGTERM'));
+process.on('uncaughtException', (err) => {
+  console.error('Uncaught exception', err);
+  shutdown('uncaughtException');
+});
+process.on('unhandledRejection', (reason) => {
+  console.error('Unhandled rejection', reason);
+  shutdown('unhandledRejection');
+});
+
 function broadcastToRoom(roomId: string, payload: any, exclude?: WebSocket) {
   const recipients = roomUserMap.get(roomId);
   const message = JSON.stringify(payload);
@@ -221,6 +246,7 @@ function broadcastToRoom(roomId: string, payload: any, exclude?: WebSocket) {
       recipients?.has(meta.userId) &&
       client.readyState === WebSocket.OPEN
     ) {
+      console.log("📡 Broadcasting to user:", meta.userId);
       client.send(message);
     }
   }
@@ -229,11 +255,17 @@ function broadcastToRoom(roomId: string, payload: any, exclude?: WebSocket) {
 function sendToUserInRoom(roomId: string, targetUserId: number, payload: any): boolean {
   const message = JSON.stringify(payload);
   for (const [client, meta] of activeClients.entries()) {
-    if (meta.roomId === roomId && meta.userId === targetUserId && client.readyState === WebSocket.OPEN) {
+    if (
+      meta.roomId === roomId &&
+      meta.userId === targetUserId &&
+      client.readyState === WebSocket.OPEN
+    ) {
+      console.log("📨 Sending message to user:", targetUserId);
       client.send(message);
       return true;
     }
   }
+  console.warn("🚫 Could not find user:", targetUserId, "in room:", roomId);
   return false;
 }
 
