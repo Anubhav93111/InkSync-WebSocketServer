@@ -82,6 +82,43 @@ wss.on("connection", (ws) => {
                     broadcastToRoom(roomId, { type: "new-message", chat }, ws);
                     break;
                 }
+                case "pointer": {
+                    if (!clientMeta) {
+                        ws.send(JSON.stringify({ type: "error", message: "Client not registered" }));
+                        return;
+                    }
+                    if (typeof parsed.x === "number" && typeof parsed.y === "number") {
+                        broadcastToRoom(clientMeta.roomId, { type: "pointer", x: parsed.x, y: parsed.y, color: parsed.color || null, userId: clientMeta.userId }, ws);
+                    }
+                    break;
+                }
+                case "lock": {
+                    if (!clientMeta) {
+                        ws.send(JSON.stringify({ type: "error", message: "Client not registered" }));
+                        return;
+                    }
+                    // broadcast lock state to other clients in the room
+                    broadcastToRoom(clientMeta.roomId, { type: "lock", lockedBy: clientMeta.userId }, ws);
+                    break;
+                }
+                case "unlock": {
+                    if (!clientMeta) {
+                        ws.send(JSON.stringify({ type: "error", message: "Client not registered" }));
+                        return;
+                    }
+                    broadcastToRoom(clientMeta.roomId, { type: "unlock" }, ws);
+                    break;
+                }
+                case "color": {
+                    if (!clientMeta) {
+                        ws.send(JSON.stringify({ type: "error", message: "Client not registered" }));
+                        return;
+                    }
+                    if (typeof parsed.color === "string") {
+                        broadcastToRoom(clientMeta.roomId, { type: "color", color: parsed.color, userId: clientMeta.userId }, ws);
+                    }
+                    break;
+                }
                 case "init":
                 case "draw":
                 case "stream":
@@ -111,7 +148,8 @@ wss.on("connection", (ws) => {
                             if (typeof parsed.index === "number") {
                                 shapes[parsed.index] = parsed.element;
                                 roomShapes.set(roomId, shapes);
-                                broadcastStreamToRoom(roomId, parsed.element, parsed.index, ws);
+                                // include any color metadata that came with the stream payload
+                                broadcastStreamToRoom(roomId, { type: "stream", element: parsed.element, index: parsed.index, color: parsed.color, userId: clientMeta.userId }, ws);
                             }
                             break;
                         case "move":
@@ -237,9 +275,9 @@ function sendToUserInRoom(roomId, targetUserId, payload) {
     console.warn("🚫 Could not find user:", targetUserId, "in room:", roomId);
     return false;
 }
-function broadcastStreamToRoom(roomId, element, index, sender) {
+function broadcastStreamToRoom(roomId, payload, sender) {
     const recipients = roomUserMap.get(roomId);
-    const message = JSON.stringify({ type: "stream", element, index });
+    const message = JSON.stringify(payload);
     for (const [client, meta] of activeClients.entries()) {
         if (client !== sender &&
             meta.roomId === roomId &&
