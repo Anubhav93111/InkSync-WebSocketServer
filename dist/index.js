@@ -19,6 +19,14 @@ const adminServer = http.createServer(async (req, res) => {
     }
     if (req.url === '/notify-login') {
         try {
+            // Check shared secret for admin endpoint security
+            const adminSecret = process.env.ADMIN_SECRET;
+            const authHeader = req.headers['x-admin-secret'] || req.headers['authorization'];
+            if (adminSecret && authHeader !== adminSecret) {
+                res.statusCode = 401;
+                res.end(JSON.stringify({ error: 'unauthorized' }));
+                return;
+            }
             let body = '';
             for await (const chunk of req)
                 body += chunk;
