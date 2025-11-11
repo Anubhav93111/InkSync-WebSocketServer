@@ -11,6 +11,63 @@ const roomShapes = new Map<string, any[]>();
 const wss = new WebSocketServer({ port: PORT });
 console.log(`🚀 WebSocket server running on port ${PORT}`);
 
+// Simple admin HTTP endpoint to receive server-originated notifications
+// e.g. POST /notify-login { userId: number, name?: string, url?: string }
+import http from "http";
+const ADMIN_PORT = Number(process.env.ADMIN_PORT ?? (PORT + 1));
+
+const adminServer = http.createServer(async (req, res) => {
+  if (!req.url || req.method !== 'POST') {
+    res.statusCode = 404;
+    res.end('not found');
+    return;
+  }
+
+  if (req.url === '/notify-login') {
+    try {
+      let body = '';
+      for await (const chunk of req) body += chunk;
+      const payload = JSON.parse(body || '{}');
+      const userId = Number(payload.userId);
+      if (!userId) {
+        res.statusCode = 400;
+        res.end(JSON.stringify({ error: 'missing userId' }));
+        return;
+      }
+
+      // Notify all connected sockets which belong to this user (in any room)
+      const message = JSON.stringify({ type: 'user-signed-in', userId, name: payload.name ?? null, url: payload.url ?? null });
+      let sent = 0;
+      for (const [client, meta] of activeClients.entries()) {
+        if (meta.userId === userId && client.readyState === WebSocket.OPEN) {
+          try {
+            client.send(message);
+            sent++;
+          } catch (e) {
+            console.warn('failed to notify client', e);
+          }
+        }
+      }
+
+      res.statusCode = 200;
+      res.end(JSON.stringify({ ok: true, notified: sent }));
+      return;
+    } catch (err) {
+      console.error('admin /notify-login error', err);
+      res.statusCode = 500;
+      res.end(JSON.stringify({ error: 'server error' }));
+      return;
+    }
+  }
+
+  res.statusCode = 404;
+  res.end('not found');
+});
+
+adminServer.listen(ADMIN_PORT, () => {
+  console.log(`🔐 Admin HTTP server listening on port ${ADMIN_PORT}`);
+});
+
 wss.on("connection", (ws: WebSocket) => {
   console.log("🔌 Client connected");
   ws.on("message", async (data: Buffer) => {
@@ -94,6 +151,99 @@ wss.on("connection", (ws: WebSocket) => {
 
         ws.send(JSON.stringify({ type: "message-sent", chat }));
         broadcastToRoom(roomId, { type: "new-message", chat }, ws);
+        break;
+      }
+
+      case "delete-message": {
+        if (!clientMeta) {
+          ws.send(JSON.stringify({ type: "error", message: "Client not registered" }));
+          return;
+        }
+
+        const { messageId } = parsed;
+        if (typeof messageId !== "number") {
+          ws.send(JSON.stringify({ type: "error", message: "Missing or invalid messageId" }));
+          return;
+        }
+
+        try {
+          // Ensure the message exists and belongs to the requesting user and room
+          const existing = await prisma.chat.findUnique({ where: { id: messageId } });
+          if (!existing) {
+            ws.send(JSON.stringify({ type: "error", message: "Message not found" }));
+            return;
+          }
+
+          if (existing.roomId !== clientMeta.roomId) {
+            ws.send(JSON.stringify({ type: "error", message: "Message does not belong to your room" }));
+            return;
+          }
+
+          if (existing.userId !== clientMeta.userId) {
+            ws.send(JSON.stringify({ type: "error", message: "Not authorized to delete this message" }));
+            return;
+          }
+
+          const deleted = await prisma.chat.delete({ where: { id: messageId } });
+
+          // Confirm to the requester and notify the rest of the room
+          try {
+            ws.send(JSON.stringify({ type: "message-deleted", id: deleted.id }));
+          } catch {}
+          broadcastToRoom(clientMeta.roomId, { type: "message-deleted", id: deleted.id }, ws);
+        } catch (err) {
+          console.error('Error deleting chat message', err);
+          try {
+            ws.send(JSON.stringify({ type: 'error', message: 'Failed to delete message' }));
+          } catch {}
+        }
+
+        break;
+      }
+
+      case "delete-messages": {
+        if (!clientMeta) {
+          ws.send(JSON.stringify({ type: "error", message: "Client not registered" }));
+          return;
+        }
+
+        const { ids } = parsed;
+        if (!Array.isArray(ids) || !ids.every((v: any) => typeof v === "number")) {
+          ws.send(JSON.stringify({ type: "error", message: "Missing or invalid ids array" }));
+          return;
+        }
+
+        try {
+          // Find messages that match requested ids and belong to this user in this room
+          const candidates = await prisma.chat.findMany({
+            where: {
+              id: { in: ids as number[] },
+              roomId: clientMeta.roomId,
+              userId: clientMeta.userId,
+            },
+            select: { id: true },
+          });
+
+          const toDeleteIds = candidates.map((c) => c.id);
+          if (toDeleteIds.length === 0) {
+            ws.send(JSON.stringify({ type: "error", message: "No deletable messages found" }));
+            return;
+          }
+
+          await prisma.chat.deleteMany({ where: { id: { in: toDeleteIds } } });
+
+          // Notify requester and broadcast to room
+          try {
+            ws.send(JSON.stringify({ type: "messages-deleted", ids: toDeleteIds }));
+          } catch {}
+          broadcastToRoom(clientMeta.roomId, { type: "messages-deleted", ids: toDeleteIds }, ws);
+        } catch (err) {
+          console.error('Error bulk deleting chat messages', err);
+          try {
+            ws.send(JSON.stringify({ type: 'error', message: 'Failed to delete messages' }));
+          } catch {}
+        }
+
         break;
       }
 
