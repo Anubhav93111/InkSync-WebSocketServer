@@ -151,6 +151,10 @@ const config = {
         "fromEnvVar": null,
         "value": "windows",
         "native": true
+      },
+      {
+        "fromEnvVar": null,
+        "value": "debian-openssl-3.0.x"
       }
     ],
     "previewFeatures": [],
@@ -177,8 +181,8 @@ const config = {
       }
     }
   },
-  "inlineSchema": "// This is your Prisma schema file,\n// learn more about it in the docs: https://pris.ly/d/prisma-schema\n\n// Looking for ways to speed up your queries, or scale easily with your serverless or edge functions?\n// Try Prisma Accelerate: https://pris.ly/cli/accelerate-init\n\ngenerator client {\n  provider = \"prisma-client-js\"\n  output   = \"../app/generated/prisma\"\n}\n\ndatasource db {\n  provider = \"postgresql\"\n  url      = env(\"DATABASE_URL\")\n}\n\nmodel User {\n  id       Int      @id @default(autoincrement())\n  email    String   @unique\n  password String\n  name     String\n  rooms    RoomId[] // many-to-many with RoomId\n  chats    Chat[] // one-to-many with Chat\n}\n\nmodel RoomId {\n  id        String   @id @default(uuid())\n  name      String\n  CreatedAt DateTime @default(now())\n  users     User[] // many-to-many with User\n  chats     Chat[] // one-to-many with Chat\n}\n\nmodel Chat {\n  id        Int      @id @default(autoincrement())\n  message   String\n  createdAt DateTime @default(now())\n  userId    Int\n  roomId    String\n\n  // Relations\n  user User   @relation(fields: [userId], references: [id])\n  room RoomId @relation(fields: [roomId], references: [id])\n}\n",
-  "inlineSchemaHash": "2eba962ea945f01c913d3796943a06597f713bd364550dd783653393ed20c806",
+  "inlineSchema": "// This is your Prisma schema file,\n// learn more about it in the docs: https://pris.ly/d/prisma-schema\n\n// Looking for ways to speed up your queries, or scale easily with your serverless or edge functions?\n// Try Prisma Accelerate: https://pris.ly/cli/accelerate-init\n\ngenerator client {\n  provider      = \"prisma-client-js\"\n  output        = \"../app/generated/prisma\"\n  binaryTargets = [\"native\", \"debian-openssl-3.0.x\"]\n}\n\ndatasource db {\n  provider = \"postgresql\"\n  url      = env(\"DATABASE_URL\")\n}\n\nmodel User {\n  id       Int      @id @default(autoincrement())\n  email    String   @unique\n  password String\n  name     String\n  rooms    RoomId[] // many-to-many with RoomId\n  chats    Chat[] // one-to-many with Chat\n}\n\nmodel RoomId {\n  id        String   @id @default(uuid())\n  name      String\n  CreatedAt DateTime @default(now())\n  users     User[] // many-to-many with User\n  chats     Chat[] // one-to-many with Chat\n}\n\nmodel Chat {\n  id        Int      @id @default(autoincrement())\n  message   String\n  createdAt DateTime @default(now())\n  userId    Int\n  roomId    String\n\n  // Relations\n  user User   @relation(fields: [userId], references: [id])\n  room RoomId @relation(fields: [roomId], references: [id])\n}\n",
+  "inlineSchemaHash": "f39b65a9220450fa63bb975eccd4db4dff39b7908103db351d07293ab8e25e55",
   "copyEngine": true
 }
 config.dirname = '/'
